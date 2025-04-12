@@ -23,7 +23,7 @@ You'll be prompted to enter an output filename, such as:
 
 ### 🌍 CommonCrawl Support
 
-- Use -s commoncrawl to fetch URLs from CommonCrawl.
+- Use --commoncrawl to fetch URLs from CommonCrawl.
 
 - Or use -s all to get both Wayback + CommonCrawl.
 
@@ -33,5 +33,5 @@ You'll be prompted to enter an output filename, such as:
 
 ### 📂 Output Directory Support
 
-- Use -o results to specify a folder where all cleaned URLs will be saved (default is results/).
+- Use -o results to specify a folder where all cleaned URLs will be saved.
 
