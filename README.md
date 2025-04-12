@@ -4,7 +4,9 @@ ParamNinja  is a python-based CLI tool designed to mine archived URLs for a give
 ## 🐍 <u>How to Install</u> :
 Create a virtual environment and install dependencies:
 
-```python
+```
+git clone https://github.com/Elite-Tadano/ParamNinja
+cd ParamNinja
 pip install -r requirements.txt
 ```
 
