@@ -5,7 +5,9 @@ import colorama
 from colorama import Fore, Style
 from urllib.parse import urlparse, parse_qs, urlencode
 import requests
-from concurrent.futures import ThreadPoolExecutor
+import re
+import threading
+import time
 
 colorama.init(autoreset=True)
 
@@ -37,21 +39,20 @@ def clean_urls(urls, extensions, placeholder="FUZZ"):
         if not has_extension(cleaned_url, extensions):
             parsed_url = urlparse(cleaned_url)
             query_params = parse_qs(parsed_url.query)
-            if query_params:
-                cleaned_params = {key: placeholder for key in query_params}
-                cleaned_query = urlencode(cleaned_params, doseq=True)
-                cleaned_url = parsed_url._replace(query=cleaned_query).geturl()
-                cleaned_urls.add(cleaned_url)
+            cleaned_params = {key: placeholder for key in query_params}
+            cleaned_query = urlencode(cleaned_params, doseq=True)
+            cleaned_url = parsed_url._replace(query=cleaned_query).geturl()
+            cleaned_urls.add(cleaned_url)
     return list(cleaned_urls)
 
 def fetch_urls_from_wayback(domain):
     logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Fetching URLs from Wayback for {Fore.CYAN + domain + Style.RESET_ALL}")
     wayback_uri = f"https://web.archive.org/cdx/search/cdx?url={domain}/*&output=txt&collapse=urlkey&fl=original"
     try:
-        response = requests.get(wayback_uri, timeout=10)
+        response = requests.get(wayback_uri, timeout=30)
         response.raise_for_status()
         urls = response.text.split()
-        logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Found {Fore.GREEN + str(len(urls)) + Style.RESET_ALL} Wayback URLs")
+        logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Found {Fore.GREEN + str(len(urls)) + Style.RESET_ALL} URLs")
         return urls
     except requests.RequestException as e:
         logging.error(f"{Fore.RED}[ERROR]{Style.RESET_ALL} Wayback fetch failed: {str(e)}")
@@ -60,81 +61,86 @@ def fetch_urls_from_wayback(domain):
 def fetch_urls_from_commoncrawl(domain):
     logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Fetching URLs from CommonCrawl for {Fore.CYAN + domain + Style.RESET_ALL}")
     index_url = "https://index.commoncrawl.org/collinfo.json"
-    urls = []
     try:
-        index_response = requests.get(index_url)
-        index_response.raise_for_status()
-        indices = index_response.json()
-        for index in indices[-3:]:  # last 3 indices only for performance
-            cc_url = index['cdx-api'] + f"?url={domain}/*&output=json"
-            r = requests.get(cc_url)
-            if r.status_code == 200:
-                for line in r.text.strip().split('\n'):
+        response = requests.get(index_url, timeout=15)
+        response.raise_for_status()
+        indexes = response.json()
+        all_urls = set()
+        for idx in indexes:
+            cc_api = idx["cdx-api"] + f"?url={domain}/*&output=json"
+            cc_resp = requests.get(cc_api, timeout=30)
+            if cc_resp.status_code == 200:
+                for line in cc_resp.text.strip().splitlines():
                     try:
-                        entry = eval(line)
-                        if 'url' in entry:
-                            urls.append(entry['url'])
+                        url = eval(line).get("url")
+                        if url:
+                            all_urls.add(url)
                     except:
                         continue
+        logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Found {Fore.GREEN + str(len(all_urls)) + Style.RESET_ALL} URLs from CommonCrawl")
+        return list(all_urls)
     except Exception as e:
         logging.error(f"{Fore.RED}[ERROR]{Style.RESET_ALL} CommonCrawl fetch failed: {str(e)}")
-    logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Found {Fore.GREEN + str(len(urls)) + Style.RESET_ALL} CommonCrawl URLs")
-    return urls
+        return []
 
-def fetch_all_sources(domain, source):
-    urls = []
-    if source in ('wayback', 'all'):
-        urls += fetch_urls_from_wayback(domain)
-    if source in ('commoncrawl', 'all'):
-        urls += fetch_urls_from_commoncrawl(domain)
-    return list(set(urls))
+def sanitize_filename(name):
+    base_name = os.path.basename(name)
+    return re.sub(r'[^a-zA-Z0-9._-]', '_', base_name)
 
-def process_domain(domain, extensions, placeholder, output_dir, source):
-    urls = fetch_all_sources(domain, source)
-    if not urls:
-        return
+def save_cleaned_urls(urls, extensions, output_file, placeholder="FUZZ"):
+    logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Cleaning URLs")
     cleaned_urls = clean_urls(urls, extensions, placeholder)
-    if not cleaned_urls:
-        return
-    output_file = os.path.join(output_dir, f"{domain.replace('.', '_')}_cleaned.txt")
-    with open(output_file, "w") as f:
-        for url in cleaned_urls:
-            f.write(url + "\n")
-    logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Saved cleaned URLs to {Fore.CYAN + output_file + Style.RESET_ALL}")
+    logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Found {Fore.GREEN + str(len(cleaned_urls)) + Style.RESET_ALL} URLs after cleaning")
+    logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Extracting URLs with parameters")
+
+    output_dir = os.path.dirname(output_file) if os.path.dirname(output_file) else "."
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    sanitized_filename = os.path.join(output_dir, sanitize_filename(output_file))
+    try:
+        with open(sanitized_filename, "w") as f:
+            for url in cleaned_urls:
+                if "?" in url:
+                    f.write(url + "\n")
+        logging.info(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Saved cleaned URLs to {Fore.CYAN + sanitized_filename + Style.RESET_ALL}")
+    except PermissionError:
+        logging.error(f"{Fore.RED}[ERROR]{Style.RESET_ALL} Permission denied: Cannot write to file {sanitized_filename}")
+
+def banner():
+    log_text = r"""
+ ________   ________   ________   ________   _____ ______    ________    ___   ________          ___   ________     
+|\   __  \ |\   __  \ |\   __  \ |\   __  \ |\   _ \  _   \ |\   ___  \ |\  \ |\   ___  \       |\  \ |\   __  \    
+\ \  \|\  \\ \  \|\  \\ \  \|\  \\ \  \|\  \\ \  \\\__\ \  \\ \  \\ \  \\ \  \\ \  \\ \  \      \ \  \\ \  \|\  \   
+ \ \   ____\\ \   __  \\ \   _  _\\ \   __  \\ \  \\|__| \  \\ \  \\ \  \\ \  \\ \  \\ \  \   __ \ \  \\ \   __  \  
+  \ \  \___| \ \  \ \  \\ \  \\  \|\ \  \ \  \\ \  \    \ \  \\ \  \\ \  \\ \  \\ \  \\ \  \ |\  \\_\  \\ \  \ \  \ 
+   \ \__\     \ \__\ \__\\ \__\\ _\ \ \__\ \__\\ \__\    \ \__\\ \__\\ \__\\ \__\\ \__\\ \__\\ \________\\ \__\ \__\
+    \|__|      \|__|\|__| \|__|\|__| \|__|\|__| \|__|     \|__| \|__| \|__| \|__| \|__| \|__| \|________| \|__|\|__|
+                                                                                                    by @Elite-Tadano                                                                                                                                                                                                                               
+    """
+    print(f"{Fore.LIGHTGREEN_EX}{log_text}{Style.RESET_ALL}")
 
 def main():
-    banner = r"""
-                                      _    __       
-   ___  ___ ________ ___ _  ___ ___  (_)__/ /__ ____
-  / _ \/ _ `/ __/ _ `/  ' \(_-</ _ \/ / _  / -_) __/
- / .__/\_,_/_/  \_,_/_/_/_/___/ .__/_/\_,_/\__/_/   
-/_/                          /_/                    
-                                                                      
-    """
-    print(Fore.YELLOW + banner + Style.RESET_ALL)
-
-    parser = argparse.ArgumentParser(description="Param Monkey - Mining URLs from Web Archives")
-    parser.add_argument("-d", "--domain", required=True, help="Single domain or path to file with domains.")
+    banner()
+    parser = argparse.ArgumentParser(description="ParamNinja - Mining & Cleaning Parameters from Web Archives")
+    parser.add_argument("-d", "--domain", required=True, help="Domain name to fetch URLs for")
+    parser.add_argument("-o", "--output", help="Output file name", default="result.txt")
     parser.add_argument("-p", "--placeholder", help="Placeholder for parameter values", default="FUZZ")
-    parser.add_argument("-o", "--output", help="Directory to save results", default="results")
-    parser.add_argument("-s", "--source", help="Source: wayback, commoncrawl, all", default="wayback")
+    parser.add_argument("--commoncrawl", action="store_true", help="Include CommonCrawl data")
     args = parser.parse_args()
 
-    if not os.path.exists(args.output):
-        os.makedirs(args.output)
-
+    domain = args.domain.lower().replace('https://', '').replace('http://', '').strip('/')
     extensions = HARDCODED_EXTENSIONS
 
-    if os.path.isfile(args.domain):
-        with open(args.domain, 'r') as f:
-            domains = [line.strip() for line in f if line.strip()]
-    else:
-        domains = [args.domain.strip()]
+    wayback_urls = fetch_urls_from_wayback(domain)
+    cc_urls = fetch_urls_from_commoncrawl(domain) if args.commoncrawl else []
+    all_urls = list(set(wayback_urls + cc_urls))
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        for domain in domains:
-            domain = domain.lower().replace('https://', '').replace('http://', '')
-            executor.submit(process_domain, domain, extensions, args.placeholder, args.output, args.source)
+    if not all_urls:
+        logging.error(f"{Fore.RED}[ERROR]{Style.RESET_ALL} No URLs found for {domain}. Exiting.")
+        return
+
+    save_cleaned_urls(all_urls, extensions, args.output, args.placeholder)
 
 if __name__ == "__main__":
     main()
